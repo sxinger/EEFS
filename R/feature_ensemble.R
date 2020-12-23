@@ -72,7 +72,7 @@ feature_ensemble<-function(rank_lst,
         spread(var,rk)
     }else if(grepl("exp_k",ensemble_mth)){
       rank_df %<>%
-        mutate(rk=(exp(-rk/k))) %>%
+        mutate(rk=-(exp(-rk/k))) %>%
         spread(var,rk)
     }else{
       stop("current ensemble method is not supported!")

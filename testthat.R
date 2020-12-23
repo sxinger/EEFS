@@ -31,5 +31,6 @@ rank_ens<-feature_ensemble(
   var_colnm="Feature",
   rank_colnm="Rank",
   ensemble_mth="exp_k_wt",
+  wt=c(0.6,0.2),
   k=3
 )
