@@ -30,28 +30,37 @@ feature_ensemble<-function(rank_lst,
                            wt=rep(1,ncol(rank_mt)),
                            k=NULL){
   
+  #=== collect features and their rankings from different model
   p<-length(rank_lst) #number of different rankings
   varlst<-c()
   rk_stack<-c()
   for(i in 1:p){
-    varlst_i<-setnames(rank_lst[[i]],
-                       old=c(var_colnm,rank_colnm),
-                       new=c("var","rk"))
-    varlst<-unique(c(varlst_i$var))
+    #subset and reorder columns so that var_colnm is the 1st column
+    varlst_i<-rank_lst[[i]][,c(var_colnm,rank_colnm)]
+    #rename column for easy referring
+    varlst_i<-setNames(varlst_i,c("var","rk"))
+    #collect all distinct features
+    varlst<-unique(c(varlst,varlst_i$var))
+    #stack feature rankings
     rk_stack %<>% 
-      bind_rows(varlst_i %>% mutate(mod=paste0("v",i)))
+      bind_rows(varlst_i %>% mutate(mod=paste0("m",i))) #add model index
   }
   n<-length(varlst) #number of distinct features ever got selected
   
-  #===
+  #=== impute rankings for un-selected features
   rank_df<-rk_stack %>%
     spread(mod,rk) %>%
     replace(is.na(.),Inf) %>%
-    gather(mod,rk) %>%
-    group_by(var) %>%
-    mutate(rk=dense_rank(rk))
+    gather(mod,rk,-var) %>%
+    group_by(mod) %>%
+    mutate(rk=dense_rank(rk)) %>%
+    # mutate(rk=rank(rk,ties.method = "min")) %>% # take the lowest ranking when ties occur
+    # mutate(rk=rank(rk,ties.method = "max")) %>% # take the highest ranking when ties occur
+    # mutate(rk=rank(rk,ties.method = "average")) %>% # take the average ranking when ties occur
+    # mutate(rk=rank(rk,ties.method = "random")) %>% # randomly assign orders when ties occur
+    ungroup 
   
-  #====
+  #==== rank transformation
   if(grepl("_k",ensemble_mth)){
     if(is.null(k)){
       stop("need to specify k, i.e. number of top features of interest!")
@@ -59,37 +68,36 @@ feature_ensemble<-function(rank_lst,
     
     if(grepl("top_k",ensemble_mth)){
       rank_df %<>%
-        gather(var,rk) %>%
-        mutate(rk=(rk<=k)) %>%
+        mutate(rk=as.numeric(rk<=k)) %>%
         spread(var,rk)
     }else if(grepl("exp_k",ensemble_mth)){
       rank_df %<>%
-        gather(var,rk) %>%
-        mutate(rk=(exp(-rank/k))) %>%
+        mutate(rk=(exp(-rk/k))) %>%
         spread(var,rk)
     }else{
       stop("current ensemble method is not supported!")
     }
   }
   
-  #====
-  if(grepl("^wt",ensemble_mth)){
+  if(grepl("wt$",ensemble_mth)){
     #weighted ensemble schemes
     if(p!=length(wt)){
       stop("length of wt should be the same as nrow(rank_mt)!")
     }
     
-    #broadcast the weight vector
-    wt_mt<-(wt/sum(wt)) %*% rep(1,n)
-    rank_df<-rank_df %*% wt_mt
+    #broadcast the normalized weight vector
+    rank_df<-as.matrix(rank_df[,-1]) * wt/sum(wt)
   }
   
+  #=== rank aggregation
   rank_df_pivot<-rank_df %>%
-    gather(var,rk) %>%
+    gather(var,rk,-mod) %>%
     group_by(var) %>%
-    summarise(agg_rk=mean(rk)) %>%
+    summarise(agg_rk=mean(rk),
+              .groups="drop") %>%
     ungroup %>%
     mutate(agg_rk=dense_rank(agg_rk))
   
   return(rank_df_pivot)
 }
+
