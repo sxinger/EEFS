@@ -27,7 +27,7 @@ feature_ensemble<-function(rank_lst,
                                           "wt_mean",
                                           "wt_top_k",
                                           "wt_exp_k"),
-                           wt=rep(1,ncol(rank_mt)),
+                           wt=rep(1,length(rank_lst)),
                            k=NULL){
   
   #=== collect features and their rankings from different model
