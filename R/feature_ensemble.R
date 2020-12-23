@@ -68,11 +68,11 @@ feature_ensemble<-function(rank_lst,
     
     if(grepl("top_k",ensemble_mth)){
       rank_df %<>%
-        mutate(rk=as.numeric(rk<=k)) %>%
+        mutate(rk=-as.numeric(rk<=k)) %>%
         spread(var,rk)
     }else if(grepl("exp_k",ensemble_mth)){
       rank_df %<>%
-        mutate(rk=-(exp(-rk/k))) %>%
+        mutate(rk=-exp(-rk/k)) %>%
         spread(var,rk)
     }else{
       stop("current ensemble method is not supported!")
