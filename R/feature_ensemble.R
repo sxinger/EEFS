@@ -85,8 +85,13 @@ feature_ensemble<-function(rank_lst,
       stop("length of wt should be the same as nrow(rank_mt)!")
     }
     
+    if(all(wt==1)){
+      warning("all weights in wt are 1!")
+    }
+    
     #broadcast the normalized weight vector
-    rank_df<-as.matrix(rank_df[,-1]) * wt/sum(wt)
+    rank_df<-data.frame(mod=rank_df[,1],
+                        as.matrix(rank_df[,-1]) * wt/sum(wt))
   }
   
   #=== rank aggregation
