@@ -1,9 +1,15 @@
-##################################################################
-# Step 2 -- estimate percentage of featrue selected              #
-#        -- retrain with different subset of features            # 
-#        -- test on both hold-in and hold-out set                #
-#        -- record out-of-sample AUC and Kuncheva index          #
-##################################################################
+################################################################
+# Feature Sizing Module                                        #
+# Parameters:                                                  #
+#  - 
+################################################################
+# Dependence: feature_ranking(data,model)
+
+
+feature_sizing<-function(data,
+                         ){
+  
+}
 
 ##set up
 rm(list=ls()); gc()
