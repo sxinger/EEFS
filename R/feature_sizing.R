@@ -1,13 +1,264 @@
-################################################################
-# Feature Sizing Module                                        #
-# Parameters:                                                  #
-#  - 
-################################################################
-# Dependence: feature_ranking(data,model)
+###################################################################
+# Feature Sizing Module                                           #
+# Parameters:                                                     #
+# -- X: a data.frame of predictors                                #
+# -- y: a vector of real labels                                   #
+# -- rank_lst:feature ranking list                                #
+#    - list: each list can be a data.frame or matrix              #
+#       with two columns (var_colnm, rank_colnm)                  #
+# -- var_colnm: column name for variable in each list             #
+# -- rank_colnm: column name for rank in each list                #
+# -- model: type of base model ("xgb","glmnet","nnet","rf","svm") #
+# -- verb: verbose, report progress                               #
+###################################################################
 
 
-feature_sizing<-function(data,
+feature_sizing<-function(X, y,              #make sure X and y are aligned row-wise
+                         rank_lst,
+                         var_colnm="var",
+                         rank_colnm="rk",
+                         model=list("xgb",
+                                    "glmnet",
+                                    "nnet",
+                                    "rf",
+                                    "svm"), #allow external model?
+                         verb=T
                          ){
+  start_fs<-Sys.time() #benchmark
+
+  #initialize loop parameters
+  a<-feat_sel_k_low
+  d<-feat_sel_k_up
+  b<-a+0.1
+  c<-d-0.1
+  auc_inc<--Inf
+  inc_p<-1
+  opt_size<-1
+  global_min<-d
+  ROC_opt_update<-0
+  
+  #initialize search path
+  feat_num<-list()
+  track_path<-c()
+  
+  #initialize AUROC as if it is by random chance
+  ROC_obj_new<-pROC::roc(y,sample(c(0,1),length(y),replace=T),direction="<") 
+  ROC_obj_opt<-ROC_obj_new
+  
+  #main body of golden-section-search algorithm
+  while(a < (d-1) && b < (c-1)){
+    start_g<-Sys.time() #benchmark
+    if(verb) cat("start golden-section search \n")
+    
+    #track the approximation path
+    track_path<-rbind(track_path,cbind(a=a,d=d))
+    
+    #update golden-section points: b,c
+    b<-floor(d-(d-a)/phi)
+    c<-floor(a+(d-a)/phi)
+    bounds<-c(a,b,c,d)
+    
+    for(k in seq_along(bounds)){
+      feat_sel_k<-bounds[k]
+      
+      #
+      if(!is.null(feat_num[[paste0("size_",feat_sel_k)]])){
+        if(verb) cat("...the case of keeping",feat_sel_k,"features has already been saved. \n")
+      }else{
+        start_j<-Sys.time()
+        if(verb) cat("...keep",feat_sel_k,"features \n")
+        
+        #####################################################################################
+        start_k<-Sys.time()
+        cat("......subset features and transform to wide sparse matrix \n")
+        
+        fs_sel<-feature_i %>%
+          mutate(rk=get(fs_mth[fs])) %>% 
+          arrange(rk) %>% dplyr::select(Feature,rk) %>% 
+          dplyr::slice(1:feat_sel_k)
+        
+        x_sparse_pat<-pat_tbl %>%
+          semi_join(dat_sample_i,by="PATIENT_NUM") %>%
+          dplyr::select(-year) %>%
+          arrange(PATIENT_NUM) #sort by patient_num
+        y<-x_sparse_pat %>% dplyr::select(DKD_IND) #sort by patient_num
+        
+        x_sparse<-fact_stack %>% 
+          semi_join(fs_sel, by=c("CONCEPT_CD"="Feature")) %>%    #subset features
+          inner_join(dat_sample_i,by="PATIENT_NUM") %>% 
+          dplyr::select(-part73) %>%
+          bind_rows(x_sparse_pat %>%
+                      dplyr::select(-DKD_IND) %>% 
+                      gather(CONCEPT_CD,NVAL_NUM,-PATIENT_NUM) %>%
+                      semi_join(fs_sel, by=c("CONCEPT_CD"="Feature"))) %>%
+          group_by(PATIENT_NUM) %>%
+          long_to_sparse_matrix(.,id="PATIENT_NUM",
+                                variable="CONCEPT_CD",
+                                val="NVAL_NUM") #sort by patient_num
+        
+        if(nrow(x_sparse)<dim(dat_sample_i)[1]){
+          dat_sample_i %<>%
+            semi_join(data.frame(PATIENT_NUM=as.numeric(rownames(x_sparse))),
+                      by="PATIENT_NUM") #shrink feature space will reduce training data size as well
+        }
+        
+        #record real y values
+        dat_sample_i[,"real"]<-y
+        
+        time_perf_i_nm<-c(time_perf_i_nm,paste0("subset_feature_transform@",fs,"@",feat_sel_k))
+        time_perf_i<-c(time_perf_i,paste0(Sys.time()-start_k,units(Sys.time()-start_k)))
+        cat("......finish subsetting and transforming in",time_perf_i[length(time_perf_i)],"\n")
+        
+        #######################################################################################
+        start_k<-Sys.time()
+        cat("......separate training and testing sets \n")
+        
+        trainx<-x_sparse[(dat_sample_i$part73=="T"),]
+        # colnames(trainx)<-c(colnames(x_sparse_pat),colnames(x_sparse_val)) #colname may be dropped when only one column is selected
+        trainy<-as.vector(y[(dat_sample_i$part73=="T"),])
+        
+        testx<-x_sparse[(dat_sample_i$part73!="T"),]
+        # colnames(testx)<-c(colnames(x_sparse_pat),colnames(x_sparse_val)) #colname may be dropped when only one column is selected
+        testy<-as.vector(y[(dat_sample_i$part73!="T"),])
+        
+        dtrain<-xgb.DMatrix(data=trainx,label=trainy)
+        dtest<-xgb.DMatrix(data=testx,label=testy)
+        
+        time_perf_i_nm<-c(time_perf_i_nm,paste0("partition@",fs,"@",feat_sel_k))
+        time_perf_i<-c(time_perf_i,paste0(Sys.time()-start_k,units(Sys.time()-start_k)))
+        cat("......finish partitioning in",time_perf_i[length(time_perf_i)],"\n") 
+        
+        ######################################################################################
+        start_k<-Sys.time()
+        cat("......tune, train and predict \n")
+        
+        hyper_perf<-c()
+        roc_lst<-c()
+        for(params in seq_len(dim(grid_params)[1])){
+          bst_tune<-xgb.cv(
+            grid_params[params,],
+            dtrain, 
+            nfold = 3, 
+            objective = objective,
+            metrics = eval_metric,
+            maximize = TRUE, 
+            nrounds=nrounds,
+            early_stopping_rounds = 50,
+            print_every_n = 200,
+            prediction=TRUE)
+          
+          hyper_perf<-rbind(hyper_perf,
+                            cbind(grid_params[params,],
+                                  metric_avg=max(bst_tune$evaluation_log[[metric_name]]),
+                                  metric_sd=max(bst_tune$evaluation_log[[metric_sd_name]]),
+                                  steps=bst_tune$best_iteration))
+          
+          roc_lst[[params]]<-pROC::roc(trainy,bst_tune$pred)
+        }
+        
+        hyper_opt<-hyper_perf[which.max(hyper_perf$metric_avg),] #take the best hyperparameter set
+        watchlist<-list(train=dtrain, test=dtest)
+        xgb_tune<-xgb.train(
+          data=dtrain,
+          max_depth=hyper_opt$max.depth,
+          eta=hyper_opt$eta,
+          min_child_weight=hyper_opt$min_child_weight,
+          ubsample=hyper_opt$subsample,
+          colsample_bytree=hyper_opt$colsample_bytree,
+          gamma=hyper_opt$gamma,
+          nrounds=hyper_opt$steps,
+          watchlist=watchlist,
+          eval_metric=eval_metric,
+          objective=objective,
+          print_every_n = 200)
+        
+        dat_sample_i[,"max_depth"]<-hyper_opt$max.depth
+        dat_sample_i[,"eta"]<-hyper_opt$eta
+        dat_sample_i[,"ntree"]<-hyper_opt$steps
+        dat_sample_i[,"fs_num"]<-feat_sel_k
+        dat_sample_i[,"fs"]<-fs_mth[fs]
+        
+        #only record validation results for final comparison, NO intermediate decisions are made based on them
+        dat_sample_i[(dat_sample_i$part73=="T"),"pred"]<-as.numeric(predict(xgb_tune,dtrain))
+        dat_sample_i[(dat_sample_i$part73!="T"),"pred"]<-as.numeric(predict(xgb_tune,dtest))
+        
+        # evaluate auc improvement
+        ROC_obj_new<-roc_lst[[which.max(hyper_perf$metric_avg)]] #take the ROC curve based on the optimal model
+        
+        #need to update opt?
+        if(ROC_obj_new$auc > ROC_obj_opt$auc){
+          ROC_obj_opt<-ROC_obj_new
+          opt_size<-feat_sel_k
+          ROC_opt_update<-ROC_opt_update+1
+        }
+        
+        # save everything about this senario, in case being called later
+        feat_num[[paste0("size_",feat_sel_k)]]<-list(model_summary=dat_sample_i,
+                                                     roc_obj=ROC_obj_new,
+                                                     ROC_opt_update=ROC_opt_update)
+        
+        time_perf_i_nm<-c(time_perf_i_nm,paste0("tune_train_predict@",fs,"@",feat_sel_k))
+        time_perf_i<-c(time_perf_i,paste0(Sys.time()-start_k,units(Sys.time()-start_k)))
+        cat("......finish tuning, training and predicting in",time_perf_i[length(time_perf_i)],"\n")
+        ##########################################################################################################
+        
+        time_perf_i_nm<-c(time_perf_i_nm,paste0("finish_eval_feature_num@",fs_mth[fs],"@",feat_sel_k))
+        time_perf_i<-c(time_perf_i,paste0(Sys.time()-start_j,units(Sys.time()-start_j)))
+        cat("...finish modeling on",feat_sel_k,"features for",fs_mth[fs],"in",time_perf_i[length(time_perf_i)],"\n")
+      }
+    }
+    
+    #compare b(2),c(3)
+    auc_b_c<-feat_num[[paste0("size_",bounds[2])]]$roc_obj$auc-feat_num[[paste0("size_",bounds[3])]]$roc_obj$auc
+    aucp_b_c<-pROC::roc.test(feat_num[[paste0("size_",bounds[2])]]$roc_obj,feat_num[[paste0("size_",bounds[3])]]$roc_obj,method='delong')$p.value
+    
+    #compare b(2) with opt
+    auc_b_opt<-feat_num[[paste0("size_",bounds[2])]]$roc_obj$auc-ROC_obj_opt$auc
+    aucp_b_opt<-pROC::roc.test(feat_num[[paste0("size_",bounds[2])]]$roc_obj,ROC_obj_opt,method='delong')$p.value
+    
+    #compare c with opt
+    auc_c_opt<-feat_num[[paste0("size_",bounds[3])]]$roc_obj$auc-ROC_obj_opt$auc
+    aucp_c_opt<-pROC::roc.test(feat_num[[paste0("size_",bounds[3])]]$roc_obj,ROC_obj_opt,method='delong')$p.value
+    
+    #update a,b,c,d
+    if((max(aucp_b_opt,aucp_c_opt) <= inc_tol_p &&
+        max(auc_b_opt,auc_c_opt) < 0)){
+      a<-b
+      d<-opt_size
+      local_min<<-opt_size
+    }else if(aucp_b_c > inc_tol_p ||
+             auc_b_c > 0){
+      d<-c
+      local_min<<-b
+    }else if(aucp_c_opt > inc_tol_p ||
+             auc_c_opt >= 0){
+      a<-b
+      local_min<<-c
+    }else{
+      stop("conditions are not exhaustive!")
+    }
+    
+    #update global_min?
+    if(local_min < global_min){
+      global_min <- local_min
+      min_model <<- xgb_tune
+    }
+    
+    #report progress
+    time_perf_i_nm<-c(time_perf_i_nm,paste0("shrink_search_interval_to_",a,"_",d))
+    time_perf_i<-c(time_perf_i,paste0(Sys.time()-start_g,units(Sys.time()-start_g)))
+    cat(fs_mth[fs],":shrink interval to[",a,",",d,"] \n")
+  }
+  
+  #end inner loop
+  feat_num$track_path<-track_path #record the search track
+  feat_num$opt_model<-xgb_tune #only record the model with optimal feature size
+  
+  fs_summary[[paste0("resample",i,"@",fs_mth[fs])]]<-feat_num
+  
+  time_perf_i_nm<-c(time_perf_i_nm,paste0("completion_at_resample",i,"@",fs_mth[fs]))
+  time_perf_i<-c(time_perf_i,paste0(Sys.time()-start_fs,units(Sys.time()-start_fs)))
+  cat("...finish evaluating feature ensemble method:",fs_mth[fs],"in",time_perf_i[length(time_perf_i)],"\n")  
   
 }
 
@@ -15,11 +266,11 @@ feature_sizing<-function(data,
 rm(list=ls()); gc()
 source("./helper_functions.R")
 require_libraries(c( "Matrix"
-                     ,"pROC"
-                     ,"xgboost"
-                     ,"dplyr"
-                     ,"tidyr"
-                     ,"magrittr"
+                    ,"pROC"
+                    ,"xgboost"
+                    ,"dplyr"
+                    ,"tidyr"
+                    ,"magrittr"
 ))
 
 ##load data
@@ -131,246 +382,7 @@ for(i in seq_len(resamples)){
   
   ################################################################
   ####experiment on different selection ratio
-  fs_mth<-colnames(feature_i)[-c(1:4,7:8,11:12)]
-  for(fs in seq_along(fs_mth)){
-    start_fs<-Sys.time()
-    cat("...rank feature importance based on",fs_mth[fs],"\n")
-    
-    #####train a classifier with selected features
-    dat_sample_i<-dat_resample_rand[[paste0("resample",i)]] %>%
-      arrange(PATIENT_NUM) #sort by patient_num
-    
-    #####adaptive feature inclusion
-    feat_num<-list()
-    
-    #initialization
-    a<-feat_sel_k_low
-    d<-feat_sel_k_up
-    b<-a+0.1
-    c<-d-0.1
-    auc_inc<--Inf
-    inc_p<-1
-    ROC_obj_new<-pROC::roc(overall_y_sort[(dat_sample_i$part73!="T")],
-                           sample(c(0,1),nrow(dat_sample_i[(dat_sample_i$part73!="T"),]),replace=T),
-                           direction="<") ## random chance
-    ROC_obj_opt<-ROC_obj_new
-    opt_size<-1
-    global_min<-d
-    ROC_opt_update<-0
-    track_path<-c()   
-    
-    while(a < (d-1) && b < (c-1)){
-      start_g<-Sys.time()
-      cat("...start golden-section search \n")
-      
-      #track the approximation path
-      track_path<-rbind(track_path,cbind(a=a,d=d))
-      
-      #update golden-section points: b,c
-      b<-floor(d-(d-a)/phi)
-      c<-floor(a+(d-a)/phi)
-      bounds<-c(a,b,c,d)
-      
-      for(k in seq_along(bounds)){
-        feat_sel_k<-bounds[k]
-        
-        if(!is.null(feat_num[[paste0("size_",feat_sel_k)]])){
-          cat("...the case of keeping",feat_sel_k,"features has already been saved. \n")
-        }else{
-          start_j<-Sys.time()
-          cat("...keep",feat_sel_k,"features \n")
-          
-          #####################################################################################
-          start_k<-Sys.time()
-          cat("......subset features and transform to wide sparse matrix \n")
-          
-          fs_sel<-feature_i %>%
-            mutate(rk=get(fs_mth[fs])) %>% 
-            arrange(rk) %>% dplyr::select(Feature,rk) %>% 
-            dplyr::slice(1:feat_sel_k)
-          
-          x_sparse_pat<-pat_tbl %>%
-            semi_join(dat_sample_i,by="PATIENT_NUM") %>%
-            dplyr::select(-year) %>%
-            arrange(PATIENT_NUM) #sort by patient_num
-          y<-x_sparse_pat %>% dplyr::select(DKD_IND) #sort by patient_num
-          
-          x_sparse<-fact_stack %>% 
-            semi_join(fs_sel, by=c("CONCEPT_CD"="Feature")) %>%    #subset features
-            inner_join(dat_sample_i,by="PATIENT_NUM") %>% 
-            dplyr::select(-part73) %>%
-            bind_rows(x_sparse_pat %>%
-                        dplyr::select(-DKD_IND) %>% 
-                        gather(CONCEPT_CD,NVAL_NUM,-PATIENT_NUM) %>%
-                        semi_join(fs_sel, by=c("CONCEPT_CD"="Feature"))) %>%
-            group_by(PATIENT_NUM) %>%
-            long_to_sparse_matrix(.,id="PATIENT_NUM",
-                                  variable="CONCEPT_CD",
-                                  val="NVAL_NUM") #sort by patient_num
-          
-          if(nrow(x_sparse)<dim(dat_sample_i)[1]){
-            dat_sample_i %<>%
-              semi_join(data.frame(PATIENT_NUM=as.numeric(rownames(x_sparse))),
-                        by="PATIENT_NUM") #shrink feature space will reduce training data size as well
-          }
-          
-          #record real y values
-          dat_sample_i[,"real"]<-y
-          
-          time_perf_i_nm<-c(time_perf_i_nm,paste0("subset_feature_transform@",fs,"@",feat_sel_k))
-          time_perf_i<-c(time_perf_i,paste0(Sys.time()-start_k,units(Sys.time()-start_k)))
-          cat("......finish subsetting and transforming in",time_perf_i[length(time_perf_i)],"\n")
-          
-          #######################################################################################
-          start_k<-Sys.time()
-          cat("......separate training and testing sets \n")
-          
-          trainx<-x_sparse[(dat_sample_i$part73=="T"),]
-          # colnames(trainx)<-c(colnames(x_sparse_pat),colnames(x_sparse_val)) #colname may be dropped when only one column is selected
-          trainy<-as.vector(y[(dat_sample_i$part73=="T"),])
-          
-          testx<-x_sparse[(dat_sample_i$part73!="T"),]
-          # colnames(testx)<-c(colnames(x_sparse_pat),colnames(x_sparse_val)) #colname may be dropped when only one column is selected
-          testy<-as.vector(y[(dat_sample_i$part73!="T"),])
-          
-          dtrain<-xgb.DMatrix(data=trainx,label=trainy)
-          dtest<-xgb.DMatrix(data=testx,label=testy)
-          
-          time_perf_i_nm<-c(time_perf_i_nm,paste0("partition@",fs,"@",feat_sel_k))
-          time_perf_i<-c(time_perf_i,paste0(Sys.time()-start_k,units(Sys.time()-start_k)))
-          cat("......finish partitioning in",time_perf_i[length(time_perf_i)],"\n") 
-          
-          ######################################################################################
-          start_k<-Sys.time()
-          cat("......tune, train and predict \n")
-          
-          hyper_perf<-c()
-          roc_lst<-c()
-          for(params in seq_len(dim(grid_params)[1])){
-            bst_tune<-xgb.cv(
-              grid_params[params,],
-              dtrain, 
-              nfold = 3, 
-              objective = objective,
-              metrics = eval_metric,
-              maximize = TRUE, 
-              nrounds=nrounds,
-              early_stopping_rounds = 50,
-              print_every_n = 200,
-              prediction=TRUE)
-            
-            hyper_perf<-rbind(hyper_perf,
-                              cbind(grid_params[params,],
-                                    metric_avg=max(bst_tune$evaluation_log[[metric_name]]),
-                                    metric_sd=max(bst_tune$evaluation_log[[metric_sd_name]]),
-                                    steps=bst_tune$best_iteration))
-            
-            roc_lst[[params]]<-pROC::roc(trainy,bst_tune$pred)
-          }
-          
-          hyper_opt<-hyper_perf[which.max(hyper_perf$metric_avg),] #take the best hyperparameter set
-          watchlist<-list(train=dtrain, test=dtest)
-          xgb_tune<-xgb.train(
-            data=dtrain,
-            max_depth=hyper_opt$max.depth,
-            eta=hyper_opt$eta,
-            min_child_weight=hyper_opt$min_child_weight,
-            ubsample=hyper_opt$subsample,
-            colsample_bytree=hyper_opt$colsample_bytree,
-            gamma=hyper_opt$gamma,
-            nrounds=hyper_opt$steps,
-            watchlist=watchlist,
-            eval_metric=eval_metric,
-            objective=objective,
-            print_every_n = 200)
-          
-          dat_sample_i[,"max_depth"]<-hyper_opt$max.depth
-          dat_sample_i[,"eta"]<-hyper_opt$eta
-          dat_sample_i[,"ntree"]<-hyper_opt$steps
-          dat_sample_i[,"fs_num"]<-feat_sel_k
-          dat_sample_i[,"fs"]<-fs_mth[fs]
-          
-          #only record validation results for final comparison, NO intermediate decisions are made based on them
-          dat_sample_i[(dat_sample_i$part73=="T"),"pred"]<-as.numeric(predict(xgb_tune,dtrain))
-          dat_sample_i[(dat_sample_i$part73!="T"),"pred"]<-as.numeric(predict(xgb_tune,dtest))
-          
-          # evaluate auc improvement
-          ROC_obj_new<-roc_lst[[which.max(hyper_perf$metric_avg)]] #take the ROC curve based on the optimal model
-          
-          #need to update opt?
-          if(ROC_obj_new$auc > ROC_obj_opt$auc){
-            ROC_obj_opt<-ROC_obj_new
-            opt_size<-feat_sel_k
-            ROC_opt_update<-ROC_opt_update+1
-          }
-          
-          # save everything about this senario, in case being called later
-          feat_num[[paste0("size_",feat_sel_k)]]<-list(model_summary=dat_sample_i,
-                                                       roc_obj=ROC_obj_new,
-                                                       ROC_opt_update=ROC_opt_update)
-          
-          time_perf_i_nm<-c(time_perf_i_nm,paste0("tune_train_predict@",fs,"@",feat_sel_k))
-          time_perf_i<-c(time_perf_i,paste0(Sys.time()-start_k,units(Sys.time()-start_k)))
-          cat("......finish tuning, training and predicting in",time_perf_i[length(time_perf_i)],"\n")
-          ##########################################################################################################
-          
-          time_perf_i_nm<-c(time_perf_i_nm,paste0("finish_eval_feature_num@",fs_mth[fs],"@",feat_sel_k))
-          time_perf_i<-c(time_perf_i,paste0(Sys.time()-start_j,units(Sys.time()-start_j)))
-          cat("...finish modeling on",feat_sel_k,"features for",fs_mth[fs],"in",time_perf_i[length(time_perf_i)],"\n")
-        }
-      }
-      
-      #compare b(2),c(3)
-      auc_b_c<-feat_num[[paste0("size_",bounds[2])]]$roc_obj$auc-feat_num[[paste0("size_",bounds[3])]]$roc_obj$auc
-      aucp_b_c<-pROC::roc.test(feat_num[[paste0("size_",bounds[2])]]$roc_obj,feat_num[[paste0("size_",bounds[3])]]$roc_obj,method='delong')$p.value
-      
-      #compare b(2) with opt
-      auc_b_opt<-feat_num[[paste0("size_",bounds[2])]]$roc_obj$auc-ROC_obj_opt$auc
-      aucp_b_opt<-pROC::roc.test(feat_num[[paste0("size_",bounds[2])]]$roc_obj,ROC_obj_opt,method='delong')$p.value
-      
-      #compare c with opt
-      auc_c_opt<-feat_num[[paste0("size_",bounds[3])]]$roc_obj$auc-ROC_obj_opt$auc
-      aucp_c_opt<-pROC::roc.test(feat_num[[paste0("size_",bounds[3])]]$roc_obj,ROC_obj_opt,method='delong')$p.value
-      
-      #update a,b,c,d
-      if((max(aucp_b_opt,aucp_c_opt) <= inc_tol_p &&
-          max(auc_b_opt,auc_c_opt) < 0)){
-        a<-b
-        d<-opt_size
-        local_min<<-opt_size
-      }else if(aucp_b_c > inc_tol_p ||
-               auc_b_c > 0){
-        d<-c
-        local_min<<-b
-      }else if(aucp_c_opt > inc_tol_p ||
-               auc_c_opt >= 0){
-        a<-b
-        local_min<<-c
-      }else{
-        stop("conditions are not exhaustive!")
-      }
-      
-      #update global_min?
-      if(local_min < global_min){
-        global_min <- local_min
-        min_model <<- xgb_tune
-      }
-      
-      #report progress
-      time_perf_i_nm<-c(time_perf_i_nm,paste0("shrink_search_interval_to_",a,"_",d))
-      time_perf_i<-c(time_perf_i,paste0(Sys.time()-start_g,units(Sys.time()-start_g)))
-      cat(fs_mth[fs],":shrink interval to[",a,",",d,"] \n")
-    }
-    
-    #end inner loop
-    feat_num$track_path<-track_path #record the search track
-    feat_num$opt_model<-xgb_tune #only record the model with optimal feature size
-    
-    fs_summary[[paste0("resample",i,"@",fs_mth[fs])]]<-feat_num
-    
-    time_perf_i_nm<-c(time_perf_i_nm,paste0("completion_at_resample",i,"@",fs_mth[fs]))
-    time_perf_i<-c(time_perf_i,paste0(Sys.time()-start_fs,units(Sys.time()-start_fs)))
-    cat("...finish evaluating feature ensemble method:",fs_mth[fs],"in",time_perf_i[length(time_perf_i)],"\n")
+
   }
   
   #end outer loop
