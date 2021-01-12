@@ -19,14 +19,16 @@
 eval_stability<-function(rank_lst,
                          var_colnm="var",
                          rank_colnm="rk",
-                         metric_type=c("kuncheva",
-                                       "wci",
-                                       "wci_rel"),
-                         f=1000,
-                         d=200){
+                         metric=c("kuncheva",
+                                  "wci",
+                                  "wci_rel"),
+                         f=NULL,
+                         d=NULL){
   
   K<-length(rank_lst)
+  varlst<-c()
   rk_stack<-c()
+  
   for(i in 1:K){
     #subset and reorder columns so that var_colnm is the 1st column
     varlst_i<-rank_lst[[i]][,c(var_colnm,rank_colnm)]
@@ -41,9 +43,13 @@ eval_stability<-function(rank_lst,
                   mutate(p=nrow(varlst_i))) #add model index
   }
   
-  if(metric_type="kuncheva"){
-    if(is.null(f)|is.null(d)){
-      stop("need to specify the total feature size, f; and a fixed subset size, d")
+  if(metric=="kuncheva"){
+    if(is.null(f)){
+      f<-length(varlst)
+    }
+    
+    if(is.null(d)){
+      d<-round(f/2)
     }
     
     #kalousis and kuncheva index
@@ -52,8 +58,8 @@ eval_stability<-function(rank_lst,
       for(j in (i+1):K){
         ki_new<-rk_stack %>%
           filter(mod_idx %in% c(i,j)) %>%
-          filter(rk<=pmin(p,d)) %>%
-          dplyr::select(var,mod) %>%
+          filter(rk<=d) %>%
+          dplyr::select(var,mod_idx) %>%
           mutate(pair_idx=paste0(i,"_",j)) %>%
           mutate(mod_idx=ifelse(mod_idx==i,"ki","kj"),ref=1) %>%
           unique %>% spread(mod_idx,ref,fill=0) %>%
@@ -67,52 +73,48 @@ eval_stability<-function(rank_lst,
     stb_idx<-pairwise_fset %>%
       group_by(pair_idx) %>%
       summarize(inter_cnt=sum(inter),
-                union_cnt=sum(union)) %>%
-      ungroup %>%
-      summarize(ki_unscale=sum((inter_cnt*f-d^2)/(d*(f-d)))*(2/(K*(K-1)))) %>%
-      mutate(ki=(ki_unscale-(-1))/(1-(-1))) #rescale
+                union_cnt=sum(union),
+                .groups="drop") %>%
+      summarize(ki_unscale=sum((inter_cnt*f-d^2)/(d*(f-d)))*(2/(K*(K-1))),
+                .groups="drop") %>%
+      mutate(ki=(ki_unscale-(-1))/(1-(-1))) #scale index to 0,1 range
   }
   
-  else if(metric_type="wci"){
+  else if(metric=="wci"){
     #weighted consistency index
     stb_idx<-rk_stack %>%
       group_by(var) %>% 
-      dplyr::summarize(phi_f=n()) %>%
-      ungroup %>% 
+      dplyr::summarize(phi_f=n(),.groups="drop") %>%
       dplyr::mutate(N=sum(phi_f)) %>%
       dplyr::mutate(phi_f_wt=(phi_f/N)*((phi_f-1)/(K-1))) %>%
       group_by(N) %>%
       dplyr::summarize(cw=sum(phi_f_wt),
-                       C=length(unique(var))) %>%
-      ungroup %>%
-      mutate(D=N %% C,
-             H=N %% K) %>%
-      mutate(cw_min=(N^2-C*(N-D)-D^2)/(C*N*(K-1)),
-             cw_max=(H^2+N*(K-1)-H*K)/(N*(K-1))) %>%
-      mutate(cw_rel=(cw-cw_min)/(cw_max-cw_min)) %>%
-      select(cw,cw_rel) 
+                       .groups="drop") %>%
+      select(cw) 
   }
   
-  else if(metric_type="wci_rel"){
+  else if(metric=="wci_rel"){
     #(relative) weighted consistency index
+    if(is.null(f)){
+      f<-length(varlst)
+    }
+    
     stb_idx<-rk_stack %>%
-      group_by(p,var) %>% 
-      dplyr::summarize(phi_f=n()) %>%
-      ungroup %>% 
-      group_by(p) %>%
+      group_by(var) %>% 
+      dplyr::summarize(phi_f=n(),
+                       .groups="drop") %>%
       dplyr::mutate(N=sum(phi_f)) %>%
       ungroup %>%
       dplyr::mutate(phi_f_wt=(phi_f/N)*((phi_f-1)/(K-1))) %>%
-      group_by(p,N) %>%
+      group_by(N) %>%
       dplyr::summarize(cw=sum(phi_f_wt),
-                       C=length(unique(Feature))) %>%
-      ungroup %>%
-      mutate(D=N %% C,
+                       .groups="drop") %>%
+      mutate(D=N %% f,
              H=N %% K) %>%
-      mutate(cw_min=(N^2-C*(N-D)-D^2)/(C*N*(K-1)),
+      mutate(cw_min=(N^2-f*(N-D)-D^2)/(f*N*(K-1)),
              cw_max=(H^2+N*(K-1)-H*K)/(N*(K-1))) %>%
       mutate(cw_rel=(cw-cw_min)/(cw_max-cw_min)) %>%
-      select(p,cw,cw_rel) 
+      select(cw_rel) 
   }
   
   else{
