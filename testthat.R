@@ -2,12 +2,12 @@
 rm(list=ls()); gc()
 
 setwd("~/#R-pkg/EEFS")
-
-library("dplyr")
-library("tidyr")
-library("magrittr")
-library("pROC")
-library("ROCR")
+source("./R/util.R")
+require_libraries(c("dplyr",
+                    "tidyr",
+                    "magrittr",
+                    "pROC",
+                    "ROCR"))
 
 #===simulate data
 feat_rk1<-data.frame(Feature=c("v1","v2","v3","v4","v5"),
