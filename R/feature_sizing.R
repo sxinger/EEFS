@@ -21,7 +21,7 @@ feature_sizing<-function(X, y,              #make sure X and y are aligned row-w
                                     "glmnet",
                                     "nnet",
                                     "rf",
-                                    "svm"), #allow external model?
+                                    "svm"), #allow external models?
                          verb=T
                          ){
   start_fs<-Sys.time() #benchmark
