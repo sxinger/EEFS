@@ -21,7 +21,7 @@ The figure above also shows the 4 steps of the feature selection framework:
 
 4) evaluation – we will identify the optimal ensemble-feature-selection model based on feature predictability and stability. The feature selection results will identify a minimal set of interventional features, simple or amalgamated or bundling, that are strongly associated with pain improvement. The associations, usually measured by average absolute changes in the likelihood of improving outcomes, are used to rank the features with a sign (positive or negative) to identify the direction of the association. Below we describe each step in more detail. 
 - a) Predictability: will be evaluated by areas under receiver operating and precision-recall curves, and as by calibration on validation sets. 
-- b) Stabilit: will be evaluated by the Kuncheva Index and a Weighted Consistency Index (WCI) for fixed feature sizes and a Relative WCI for flexible feature sizes adapted to different feature selection algorithms.
+- b) Stability: will be evaluated by the Kuncheva Index and a Weighted Consistency Index (WCI) for fixed feature sizes and a Relative WCI for flexible feature sizes adapted to different feature selection algorithms.
 
 
 Please cite our paper if you are using our package: 
