@@ -13,6 +13,7 @@
 ###################################################################
 
 source("./R/util.R")
+source("./R/feature_ranking.R")
 
 feature_sizing<-function(df,             #a data.frame: require "id","y" columns, while all the rest are predictors
                          var_rk,
@@ -150,7 +151,7 @@ feature_sizing<-function(df,             #a data.frame: require "id","y" columns
     #update global_min?
     if(local_min < global_min){
       global_min <- local_min
-      min_model <<- xgb_tune
+      min_model <<- feat_rk_out$model
     }
     
     #--------------------------------------benchmark---------------------------------------------------------#
@@ -160,11 +161,10 @@ feature_sizing<-function(df,             #a data.frame: require "id","y" columns
     #--------------------------------------benchmark---------------------------------------------------------#
   
   } #end while loop
-  
+  feat_num$opt_model<-feat_rk_out #only record the model with optimal feature size
   feat_num$track_path<-track_path #record the search track
-  feat_num$opt_model<-xgb_tune #only record the model with optimal feature size
-  feat_num$benchmark<-data.frame(task=,
-                                 time,
+  feat_num$benchmark<-data.frame(benchmark_task=time_perf_i_nm,
+                                 benchmark_time=time_perf_i,
                                  stringsAsFactors = F)
   return(feat_num)
 }
